@@ -13,6 +13,7 @@ import '../data/sign_parser.dart';
 import '../data/portal_parser.dart';
 import '../data/user_center_parser.dart';
 import '../models/models.dart';
+import 'anti_bot_service.dart';
 
 /// MT 论坛网络门面。
 ///
@@ -35,6 +36,7 @@ class ApiService {
   late final Dio _dio;
   late final Dio _desktopDio;
   late final CookieJar _cookieJar;
+  late final CookieJar _desktopCookieJar;
   late final SharedPreferences _prefs;
 
   bool _initialized = false;
@@ -90,12 +92,19 @@ class ApiService {
           'User-Agent':
               'Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 '
                   '(KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36',
+          'Accept':
+              'text/html,application/xhtml+xml,application/xml;q=0.9,'
+                  'image/avif,image/webp,*/*;q=0.8',
           'Accept-Language': 'zh-CN,zh;q=0.9',
           'Accept-Encoding': 'gzip',
+          'Upgrade-Insecure-Requests': '1',
         },
       ),
     );
     _dio.interceptors.add(CookieManager(_cookieJar));
+    // 论坛被攻击后会开启阿里云人机验证，这里自动求解 acw_sc__v2 并重试。
+    _dio.interceptors.add(AntiBotInterceptor(jar: _cookieJar, dio: _dio));
+    _desktopCookieJar = CookieJar();
     _desktopDio = Dio(
       BaseOptions(
         connectTimeout: const Duration(seconds: 15),
@@ -105,10 +114,19 @@ class ApiService {
               'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                   'AppleWebKit/537.36 (KHTML, like Gecko) '
                   'Chrome/150.0.0.0 Safari/537.36',
+          'Accept':
+              'text/html,application/xhtml+xml,application/xml;q=0.9,'
+                  'image/avif,image/webp,*/*;q=0.8',
           'Accept-Language': 'zh-CN,zh;q=0.9',
           'Accept-Encoding': 'gzip',
+          'Upgrade-Insecure-Requests': '1',
         },
       ),
+    );
+    // 桌面版请求不挂 CookieManager（避免覆盖手动拼接的登录 Cookie），
+    // 由拦截器在重试时自行合并 Cookie。
+    _desktopDio.interceptors.add(
+      AntiBotInterceptor(jar: _desktopCookieJar, dio: _desktopDio),
     );
 
     // 所有 HTML/AJAX 响应只要带 formhash，就自动收入缓存。
@@ -458,6 +476,9 @@ class ApiService {
 
     final body = response.data ?? '';
     final status = response.statusCode ?? 0;
+    if (AntiBotChallenge.isChallenge(body)) {
+      throw StateError('论坛开启了人机验证，自动验证失败，请稍后重试');
+    }
     final missingThread = status == 404 ||
         body.contains('指定的主题不存在或已被删除或正在被审核') ||
         body.contains('指定的主题不存在') ||
